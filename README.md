@@ -4,12 +4,25 @@ A complete sample project demonstrating how to use the **WeAct Studio E-Paper Mo
 
 ## 🖼️ What This Sample Demonstrates
 
+<table>
+<tr>
+<td width="50%">
+
 - **E-ink Display Integration**: Using GxEPD2 library with 1.54" 200x200 monochrome e-paper
 - **LVGL UI Framework**: Modern graphics library with efficient rendering for constrained devices
 - **Smart Refresh Strategy**: Balancing partial updates for speed with periodic full refreshes to prevent ghosting
 - **Memory-Efficient Design**: Optimized buffer management for ESP32's limited RAM
 - **Low Power Techniques**: Manual refresh control instead of continuous polling
 - **Production-Ready Code**: Well-commented, easy to understand and extend
+
+</td>
+<td width="50%">
+
+![Demo Animation](docs/assets/demo.gif)
+
+</td>
+</tr>
+</table>
 
 ## 📦 Hardware Requirements
 
