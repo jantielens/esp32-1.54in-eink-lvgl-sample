@@ -32,6 +32,7 @@
  */
 
 #include "eink_display.h"
+#include <cstring>
 
 // ===== GLOBAL OBJECTS =====
 static GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
@@ -39,10 +40,20 @@ static GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
 );
 
 static lv_display_t *lv_disp = nullptr;
-// LVGL buffer: 50 lines - balance between memory usage and flush efficiency
-// Note: Widgets at y=107-180 (73 lines) may still require 2 flushes, but that's optimal
-static lv_color_t lv_disp_buf[SCREEN_WIDTH * 50] __attribute__((aligned(4)));
+// LVGL buffer: 25 lines - balance between memory usage and flush efficiency
+// Note: Widgets spanning >25px vertically will trigger multiple flushes, which is acceptable
+static lv_color_t lv_disp_buf[SCREEN_WIDTH * 25] __attribute__((aligned(4)));
 static uint8_t partial_update_count = 0;
+static uint8_t full_frame_buffer[(SCREEN_WIDTH * SCREEN_HEIGHT + 7) / 8] = {0};
+static bool full_refresh_pending = false;
+static uint8_t full_refresh_row_bitmap[(SCREEN_HEIGHT + 7) / 8] = {0};
+
+static inline void set_full_frame_pixel(uint16_t x, uint16_t y, bool is_black);
+static inline bool get_full_frame_pixel(uint16_t x, uint16_t y);
+static void mark_rows_covered(uint16_t y1, uint16_t y2);
+static bool all_rows_covered();
+static void perform_full_refresh();
+static void schedule_full_refresh_request();
 
 // ===== LVGL DISPLAY DRIVER =====
 // This is the heart of the driver - called by LVGL whenever the screen needs updating.
@@ -73,25 +84,8 @@ static void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px
   
   uint32_t w = area->x2 - area->x1 + 1;
   uint32_t h = area->y2 - area->y1 + 1;
-  
-  // Check if this is a full screen update or partial
-  bool is_full_screen = (w == SCREEN_WIDTH && h == SCREEN_HEIGHT);
-  
-  // Decide between partial and full refresh
-  // Counter tracks flush calls (not user update cycles!)
-  // Do full refresh if: counter exceeded limit AND this is already a full screen update
-  bool do_full_refresh = (partial_update_count >= MAX_PARTIAL_UPDATES) && is_full_screen;
-  
-  if (do_full_refresh) {
-    Serial.println("[E-INK] Full refresh to clear ghosting");
-    // Full refresh: hibernate, reinit, then use full screen partial window
-    display.hibernate();
-    display.init(115200, true, 2, false);
-    display.setPartialWindow(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-    partial_update_count = 0;
-  } else {
-    display.setPartialWindow(area->x1, area->y1, w, h);
-  }
+
+  display.setPartialWindow(area->x1, area->y1, w, h);
   
   // Increment counter after deciding
   // Note: This counts flush calls, not user update cycles
@@ -134,10 +128,11 @@ static void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px
             // INVERT pixel value:
             // LVGL: 0=black, 1=white
             // GxEPD2: 0=white, 1=black (inverted!)
-            if (pixel == 0) {  // If LVGL says black
+            bool is_black = (pixel == 0);
+            if (is_black) {
               epd_byte |= (0x80 >> bit);  // Set bit to 1 for GxEPD2
             }
-            // If pixel == 1 (white), leave bit as 0
+            set_full_frame_pixel(area->x1 + x, area->y1 + y, is_black);
           }
         }
         // Store converted byte
@@ -172,6 +167,13 @@ static void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     } while (display.nextPage());
   }
   
+  if (full_refresh_pending) {
+    mark_rows_covered(area->y1, area->y2);
+    if (all_rows_covered()) {
+      perform_full_refresh();
+    }
+  }
+
   lv_display_flush_ready(disp);
 }
 
@@ -205,7 +207,11 @@ void eink_force_full_refresh()
   // Force full screen invalidation when threshold reached
   // Note: Counter tracks flush calls - with multiple widgets updating,
   // the threshold may be reached in fewer user update cycles than expected
+  if (full_refresh_pending) {
+    return;
+  }
   if (partial_update_count >= MAX_PARTIAL_UPDATES) {
+    schedule_full_refresh_request();
     lv_obj_invalidate(lv_screen_active());
   }
 }
@@ -213,4 +219,86 @@ void eink_force_full_refresh()
 lv_display_t* eink_get_display()
 {
   return lv_disp;
+}
+
+// Persist a single pixel into the 1-bit framebuffer so we can replay it later.
+static inline void set_full_frame_pixel(uint16_t x, uint16_t y, bool is_black)
+{
+  uint32_t bit_index = static_cast<uint32_t>(y) * SCREEN_WIDTH + x;
+  uint32_t byte_index = bit_index / 8;
+  uint8_t bit_mask = 0x80 >> (bit_index % 8);
+  if (is_black) {
+    full_frame_buffer[byte_index] |= bit_mask;
+  } else {
+    full_frame_buffer[byte_index] &= ~bit_mask;
+  }
+}
+
+// Read a pixel back from the framebuffer during the scheduled full refresh.
+static inline bool get_full_frame_pixel(uint16_t x, uint16_t y)
+{
+  uint32_t bit_index = static_cast<uint32_t>(y) * SCREEN_WIDTH + x;
+  uint32_t byte_index = bit_index / 8;
+  uint8_t bit_mask = 0x80 >> (bit_index % 8);
+  return (full_frame_buffer[byte_index] & bit_mask) != 0;
+}
+
+// Track which rows LVGL has flushed so we know when the whole screen is dirtied.
+static void mark_rows_covered(uint16_t y1, uint16_t y2)
+{
+  for (uint16_t row = y1; row <= y2 && row < SCREEN_HEIGHT; row++) {
+    uint16_t bit_index = row;
+    uint16_t byte_index = bit_index / 8;
+    uint8_t bit_mask = 1u << (bit_index % 8);
+    full_refresh_row_bitmap[byte_index] |= bit_mask;
+  }
+}
+
+// Returns true once every row has been touched since the refresh was scheduled.
+static bool all_rows_covered()
+{
+  const uint16_t total_rows = SCREEN_HEIGHT;
+  const uint16_t full_bytes = total_rows / 8;
+  for (uint16_t i = 0; i < full_bytes; i++) {
+    if (full_refresh_row_bitmap[i] != 0xFF) {
+      return false;
+    }
+  }
+  uint16_t remaining_bits = total_rows % 8;
+  if (remaining_bits == 0) {
+    return true;
+  }
+  uint8_t mask = static_cast<uint8_t>((1u << remaining_bits) - 1u);
+  return (full_refresh_row_bitmap[full_bytes] & mask) == mask;
+}
+
+// Replays the stored framebuffer after hibernating/reinitializing to clear ghosting.
+static void perform_full_refresh()
+{
+  Serial.println("[E-INK] Executing scheduled full refresh");
+  display.hibernate();
+  display.init(115200, true, 2, false);
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    for (uint16_t y = 0; y < SCREEN_HEIGHT; y++) {
+      for (uint16_t x = 0; x < SCREEN_WIDTH; x++) {
+        bool is_black = get_full_frame_pixel(x, y);
+        display.writePixel(x, y, is_black ? GxEPD_BLACK : GxEPD_WHITE);
+      }
+    }
+  } while (display.nextPage());
+  partial_update_count = 0;
+  full_refresh_pending = false;
+  std::memset(full_refresh_row_bitmap, 0, sizeof(full_refresh_row_bitmap));
+}
+
+// Flag that the next sweep should perform a full refresh once all rows have flushed.
+static void schedule_full_refresh_request()
+{
+  if (full_refresh_pending) {
+    return;
+  }
+  full_refresh_pending = true;
+  std::memset(full_refresh_row_bitmap, 0, sizeof(full_refresh_row_bitmap));
 }
