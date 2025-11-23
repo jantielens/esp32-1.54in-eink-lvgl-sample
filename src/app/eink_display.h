@@ -68,6 +68,8 @@
 // ===== DISPLAY FUNCTIONS =====
 void eink_init();
 void eink_force_full_refresh();
+void eink_poweroff();
+void eink_full_refresh_now();
 lv_display_t* eink_get_display();
 
 #endif // EINK_DISPLAY_H

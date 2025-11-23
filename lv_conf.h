@@ -53,7 +53,7 @@
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_16 0
 #define LV_FONT_MONTSERRAT_18 0
-#define LV_FONT_MONTSERRAT_20 0
+#define LV_FONT_MONTSERRAT_20 1
 #define LV_FONT_MONTSERRAT_22 0
 #define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_26 0
@@ -83,7 +83,7 @@
 #define LV_USE_BUTTON   1
 #define LV_USE_IMAGE    1
 #define LV_USE_LINE     1
-#define LV_USE_ARC      0
+#define LV_USE_ARC      1
 
 /* Extra widgets */
 #define LV_USE_BAR      1
