@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Configuration
 SKETCH_PATH="$SCRIPT_DIR/src/app/app.ino"
 BUILD_PATH="$SCRIPT_DIR/build"
-FQBN="esp32:esp32:esp32"  # Fully Qualified Board Name for ESP32 Dev Module
+FQBN="esp32:esp32:esp32:PartitionScheme=min_spiffs"  # ESP32 Dev Module with minimal SPIFFS partition (larger app space)
 ARDUINO_CLI="$SCRIPT_DIR/bin/arduino-cli"
 
 echo "=== Building ESP32 Firmware ==="

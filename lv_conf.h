@@ -19,7 +19,7 @@
  *=========================*/
 /* ESP32 has plenty of RAM */
 #define LV_MEM_CUSTOM 0
-#define LV_MEM_SIZE (64U * 1024U)  /* 64KB for LVGL heap */
+#define LV_MEM_SIZE (48U * 1024U)  /* 48KB for LVGL heap */
 
 /*====================
    HAL SETTINGS
@@ -55,7 +55,7 @@
 #define LV_FONT_MONTSERRAT_18 0
 #define LV_FONT_MONTSERRAT_20 1
 #define LV_FONT_MONTSERRAT_22 0
-#define LV_FONT_MONTSERRAT_24 1
+#define LV_FONT_MONTSERRAT_24 0
 #define LV_FONT_MONTSERRAT_26 0
 #define LV_FONT_MONTSERRAT_28 0
 #define LV_FONT_MONTSERRAT_30 0
@@ -83,10 +83,10 @@
 #define LV_USE_BUTTON   1
 #define LV_USE_IMAGE    1
 #define LV_USE_LINE     1
-#define LV_USE_ARC      1
+#define LV_USE_ARC      0
 
 /* Extra widgets */
-#define LV_USE_BAR      1
+#define LV_USE_BAR      0
 #define LV_USE_CHECKBOX 0
 #define LV_USE_DROPDOWN 0
 #define LV_USE_SLIDER   0

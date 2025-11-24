@@ -1,14 +1,15 @@
 /*
  * Splash Screen
  * 
- * Simple splash screen shown at startup for 5 seconds.
- * Displays project name and version information.
+ * Splash screen shown at startup.
+ * Displays project name, version, and connection status.
+ * Connects to WiFi and MQTT during initialization.
  * 
  * LIFECYCLE:
- * - Shown on boot for 5 seconds
- * - No MQTT subscriptions
- * - No periodic updates
- * - Automatically transitions to Home screen
+ * - Shown on boot
+ * - Connects to WiFi and MQTT
+ * - Shows connection status
+ * - Transitions to Grid Power screen when connected
  */
 
 #include "screen_base.h"
@@ -18,7 +19,7 @@
 lv_obj_t *ui_Screen_Splash = NULL;
 lv_obj_t *ui_Label_Splash_Title = NULL;
 lv_obj_t *ui_Label_Splash_Version = NULL;
-lv_obj_t *ui_Label_Splash_Chip = NULL;
+lv_obj_t *ui_Label_Splash_Status = NULL;
 
 // Screen initialization (SquareLine Studio pattern)
 void ui_Screen_Splash_init(void)
@@ -44,15 +45,13 @@ void ui_Screen_Splash_init(void)
     lv_obj_set_style_text_font(ui_Label_Splash_Version, &lv_font_montserrat_14, 0);
     lv_obj_align(ui_Label_Splash_Version, LV_ALIGN_CENTER, 0, 0);
     
-    // Chip info label
-    ui_Label_Splash_Chip = lv_label_create(ui_Screen_Splash);
-    String chip_info = String(ESP.getChipModel()) + " @ " + 
-                      String(ESP.getCpuFreqMHz()) + " MHz";
-    lv_label_set_text(ui_Label_Splash_Chip, chip_info.c_str());
-    lv_obj_set_style_text_color(ui_Label_Splash_Chip, lv_color_black(), 0);
-    lv_obj_set_style_text_font(ui_Label_Splash_Chip, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_align(ui_Label_Splash_Chip, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(ui_Label_Splash_Chip, LV_ALIGN_BOTTOM_MID, 0, -40);
+    // Status label
+    ui_Label_Splash_Status = lv_label_create(ui_Screen_Splash);
+    lv_label_set_text(ui_Label_Splash_Status, "Initializing...");
+    lv_obj_set_style_text_color(ui_Label_Splash_Status, lv_color_black(), 0);
+    lv_obj_set_style_text_font(ui_Label_Splash_Status, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_align(ui_Label_Splash_Status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(ui_Label_Splash_Status, LV_ALIGN_BOTTOM_MID, 0, -30);
 }
 
 // Screen destruction (SquareLine Studio pattern)
@@ -66,11 +65,19 @@ void ui_Screen_Splash_destroy(void)
     ui_Screen_Splash = NULL;
     ui_Label_Splash_Title = NULL;
     ui_Label_Splash_Version = NULL;
-    ui_Label_Splash_Chip = NULL;
+    ui_Label_Splash_Status = NULL;
 }
 
 // Get screen object (for screen manager)
 lv_obj_t* ui_Screen_Splash_get_obj(void)
 {
     return ui_Screen_Splash;
+}
+
+// Update status message
+void ui_Screen_Splash_set_status(const char* status)
+{
+    if(ui_Label_Splash_Status) {
+        lv_label_set_text(ui_Label_Splash_Status, status);
+    }
 }

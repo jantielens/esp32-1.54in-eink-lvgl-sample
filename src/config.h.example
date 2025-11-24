@@ -1,0 +1,25 @@
+/*
+ * Configuration Template
+ * 
+ * Copy this file to config.h and fill in your credentials.
+ * config.h is gitignored and won't be committed to the repository.
+ */
+
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// WiFi Configuration
+#define WIFI_SSID "your_wifi_ssid"
+#define WIFI_PASSWORD "your_wifi_password"
+
+// MQTT Configuration
+#define MQTT_SERVER "192.168.1.30"
+#define MQTT_PORT 1883
+#define MQTT_USER "your_user"
+#define MQTT_PASSWORD "your_password"
+
+// MQTT Topics
+#define MQTT_TOPIC_GRID_POWER "data/devices/utility_meter/total_active_power"
+#define MQTT_TOPIC_SOLAR_POWER "shelly_solar_power"
+
+#endif // CONFIG_H

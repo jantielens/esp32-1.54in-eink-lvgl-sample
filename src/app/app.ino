@@ -1,21 +1,12 @@
 /*
- * ESP32 + E-Paper Display + LVGL Sample Project
+ * ESP32 + E-Paper Display + LVGL + MQTT Project
  * 
- * This sample demonstrates best practices for integrating e-ink displays
- * with LVGL (Light and Versatile Graphics Library) on ESP32.
- * 
- * KEY CONCEPTS:
- * - E-ink displays are bistable (retain image without power)
- * - Slow refresh rates (2-5s full, 0.5-2s partial)
- * - Partial updates are faster but cause ghosting over time
- * - Manual refresh control saves power vs continuous polling
- * 
- * WHAT THIS DEMO SHOWS:
+ * This project demonstrates:
+ * - E-ink display with LVGL integration
+ * - WiFi connectivity
+ * - MQTT subscription for real-time data
  * - Multi-screen architecture with lifecycle management
- * - Splash (5s) -> Arc (20s) -> Bar (20s) -> Arc (20s) -> Bar (20s)...
  * - SquareLine Studio compatible screen pattern
- * - MQTT-ready architecture (lifecycle hooks for future)
- * - Hybrid refresh strategy (partial + periodic full refresh)
  * - Memory-efficient LVGL integration
  * - Manual refresh control for low power operation
  * 
@@ -28,17 +19,31 @@
  * - GxEPD2: E-ink display driver
  * - LVGL: Graphics library
  * - Adafruit GFX: Graphics primitives
+ * - WiFi: ESP32 WiFi
+ * - PubSubClient: MQTT client
+ * - ArduinoJson: JSON parsing
  */
 
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include "../version.h"
+#include "../config.h"
 #include "eink_display.h"
 #include "screen_base.h"
+
+// ===== MQTT CLIENT =====
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+// ===== CONNECTION STATE =====
+bool wifi_connected = false;
+bool mqtt_connected = false;
 
 // ===== SCREEN ENUM =====
 typedef enum {
     SCREEN_SPLASH,
-    SCREEN_ARC,
-    SCREEN_BAR,
+    SCREEN_GRID_POWER,
     SCREEN_COUNT  // Total number of screens
 } screen_id_t;
 
@@ -46,25 +51,22 @@ typedef enum {
 // Splash Screen
 void ui_Screen_Splash_init(void);
 void ui_Screen_Splash_destroy(void);
+void ui_Screen_Splash_set_status(const char* status);
 lv_obj_t* ui_Screen_Splash_get_obj(void);
 
-// Arc Screen
-void ui_Screen_Arc_init(void);
-void ui_Screen_Arc_destroy(void);
-void ui_Screen_Arc_on_update(void);
-lv_obj_t* ui_Screen_Arc_get_obj(void);
-
-// Bar Screen
-void ui_Screen_Bar_init(void);
-void ui_Screen_Bar_destroy(void);
-void ui_Screen_Bar_on_update(void);
-lv_obj_t* ui_Screen_Bar_get_obj(void);
+// Grid Power Screen
+void ui_Screen_GridPower_init(void);
+void ui_Screen_GridPower_destroy(void);
+void ui_Screen_GridPower_on_activate(void);
+void ui_Screen_GridPower_on_deactivate(void);
+void ui_Screen_GridPower_on_mqtt_message(const char* topic, const char* payload);
+lv_obj_t* ui_Screen_GridPower_get_obj(void);
 
 // ===== SCREEN REGISTRY =====
 // Array of all screens with their lifecycle functions
 // This table drives the screen manager
 screen_t screens[SCREEN_COUNT] = {
-    // Splash Screen (5 seconds, no updates, no MQTT)
+    // Splash Screen (shows connection status)
     {
         .init = ui_Screen_Splash_init,
         .destroy = ui_Screen_Splash_destroy,
@@ -74,24 +76,14 @@ screen_t screens[SCREEN_COUNT] = {
         .on_update = NULL,
         .screen_obj = NULL
     },
-    // Arc Screen (20 seconds, periodic updates for animation)
+    // Grid Power Screen (MQTT-driven)
     {
-        .init = ui_Screen_Arc_init,
-        .destroy = ui_Screen_Arc_destroy,
-        .on_activate = NULL,
-        .on_deactivate = NULL,
-        .on_mqtt_message = NULL,
-        .on_update = ui_Screen_Arc_on_update,
-        .screen_obj = NULL
-    },
-    // Bar Screen (20 seconds, periodic updates)
-    {
-        .init = ui_Screen_Bar_init,
-        .destroy = ui_Screen_Bar_destroy,
-        .on_activate = NULL,
-        .on_deactivate = NULL,
-        .on_mqtt_message = NULL,
-        .on_update = ui_Screen_Bar_on_update,
+        .init = ui_Screen_GridPower_init,
+        .destroy = ui_Screen_GridPower_destroy,
+        .on_activate = ui_Screen_GridPower_on_activate,
+        .on_deactivate = ui_Screen_GridPower_on_deactivate,
+        .on_mqtt_message = ui_Screen_GridPower_on_mqtt_message,
+        .on_update = NULL,
         .screen_obj = NULL
     }
 };
@@ -100,11 +92,146 @@ screen_t screens[SCREEN_COUNT] = {
 screen_id_t current_screen_id = SCREEN_SPLASH;
 unsigned long screen_start_time = 0;
 
-// ===== APP STATE =====
-unsigned long lastUpdate = 0;
-const unsigned long UPDATE_INTERVAL = 2000; // Update every 5 seconds
-const unsigned long SPLASH_DURATION = 5000; // Splash screen for 5 seconds
-const unsigned long ARC_BAR_DURATION = 20000; // Arc and Bar screens for 20 seconds each
+// ===== DISPLAY REFRESH STATE =====
+bool display_needs_refresh = false;
+
+// ===== WIFI CONNECTION =====
+void connect_wifi() {
+    Serial.print("\n[WiFi] Connecting to ");
+    Serial.println(WIFI_SSID);
+    ui_Screen_Splash_set_status("Connecting to WiFi...");
+    lv_refr_now(eink_get_display());
+    
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        wifi_connected = true;
+        Serial.println("\n[WiFi] Connected!");
+        Serial.print("[WiFi] IP address: ");
+        Serial.println(WiFi.localIP());
+        ui_Screen_Splash_set_status("WiFi connected");
+        lv_refr_now(eink_get_display());
+    } else {
+        Serial.println("\n[WiFi] Failed to connect");
+        ui_Screen_Splash_set_status("WiFi failed");
+        lv_refr_now(eink_get_display());
+    }
+}
+
+// ===== MQTT CALLBACK =====
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+    // Convert payload to string
+    char message[length + 1];
+    memcpy(message, payload, length);
+    message[length] = '\0';
+    
+    Serial.print("[MQTT] Message arrived on topic: ");
+    Serial.println(topic);
+    
+    // Route message to current screen's MQTT handler
+    screen_t *current_screen = &screens[current_screen_id];
+    if (current_screen->on_mqtt_message) {
+        current_screen->on_mqtt_message(topic, message);
+    }
+}
+
+// ===== MQTT CONNECTION =====
+void connect_mqtt() {
+    Serial.println("\n[MQTT] Connecting to broker...");
+    ui_Screen_Splash_set_status("Connecting to MQTT...");
+    lv_refr_now(eink_get_display());
+    
+    mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+    mqttClient.setBufferSize(512);  // Increase buffer for larger JSON messages
+    mqttClient.setCallback(mqtt_callback);
+    
+    Serial.print("[MQTT] Buffer size set to: ");
+    Serial.println(mqttClient.getBufferSize());
+    
+    // Generate client ID
+    String clientId = "ESP32-";
+    clientId += String(random(0xffff), HEX);
+    
+    int attempts = 0;
+    while (!mqttClient.connected() && attempts < 5) {
+        Serial.print("[MQTT] Attempting connection... ");
+        
+        if (mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
+            mqtt_connected = true;
+            Serial.println("connected");
+            ui_Screen_Splash_set_status("MQTT connected");
+            lv_refr_now(eink_get_display());
+            
+            // Subscribe to topics
+            Serial.print("[MQTT] Subscribing to: ");
+            Serial.println(MQTT_TOPIC_GRID_POWER);
+            bool subscribed = mqttClient.subscribe(MQTT_TOPIC_GRID_POWER);
+            if (subscribed) {
+                Serial.println("[MQTT] Grid power subscription successful");
+            } else {
+                Serial.println("[MQTT] Grid power subscription failed!");
+            }
+            
+            Serial.print("[MQTT] Subscribing to: ");
+            Serial.println(MQTT_TOPIC_SOLAR_POWER);
+            subscribed = mqttClient.subscribe(MQTT_TOPIC_SOLAR_POWER);
+            if (subscribed) {
+                Serial.println("[MQTT] Solar power subscription successful");
+            } else {
+                Serial.println("[MQTT] Solar power subscription failed!");
+            }
+        } else {
+            Serial.print("failed, rc=");
+            Serial.print(mqttClient.state());
+            Serial.println(" retrying in 2 seconds");
+            attempts++;
+            delay(2000);
+        }
+    }
+    
+    if (!mqtt_connected) {
+        Serial.println("[MQTT] Failed to connect");
+        ui_Screen_Splash_set_status("MQTT failed");
+        lv_refr_now(eink_get_display());
+    }
+}
+
+// ===== MQTT RECONNECTION =====
+void reconnect_mqtt() {
+    if (!mqttClient.connected()) {
+        Serial.println("[MQTT] Connection lost, reconnecting...");
+        mqtt_connected = false;
+        
+        String clientId = "ESP32-";
+        clientId += String(random(0xffff), HEX);
+        
+        if (mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
+            Serial.println("[MQTT] Reconnected");
+            mqtt_connected = true;
+            
+            // Resubscribe to topics
+            Serial.print("[MQTT] Resubscribing to: ");
+            Serial.println(MQTT_TOPIC_GRID_POWER);
+            mqttClient.subscribe(MQTT_TOPIC_GRID_POWER);
+            Serial.print("[MQTT] Resubscribing to: ");
+            Serial.println(MQTT_TOPIC_SOLAR_POWER);
+            mqttClient.subscribe(MQTT_TOPIC_SOLAR_POWER);
+        }
+    }
+}
+
+// ===== DISPLAY REFRESH TRIGGER =====
+void trigger_display_refresh() {
+    display_needs_refresh = true;
+}
 
 // ===== SCREEN MANAGEMENT =====
 // Load a screen by ID
@@ -134,10 +261,8 @@ void load_screen(screen_id_t screen_id)
     // Update screen_obj pointer
     if(screen_id == SCREEN_SPLASH) {
         new_screen->screen_obj = ui_Screen_Splash_get_obj();
-    } else if(screen_id == SCREEN_ARC) {
-        new_screen->screen_obj = ui_Screen_Arc_get_obj();
-    } else if(screen_id == SCREEN_BAR) {
-        new_screen->screen_obj = ui_Screen_Bar_get_obj();
+    } else if(screen_id == SCREEN_GRID_POWER) {
+        new_screen->screen_obj = ui_Screen_GridPower_get_obj();
     }
     
     // Load screen into LVGL (make new screen active BEFORE destroying old)
@@ -168,7 +293,7 @@ void setup()
   delay(1000);
   
   // Print startup message
-  Serial.println("\n=== ESP32 E-INK + LVGL Multi-Screen Demo ===");
+  Serial.println("\n=== ESP32 E-INK + LVGL + MQTT Demo ===");
   printVersionInfo();
   Serial.println();
   Serial.print("Chip Model: ");
@@ -181,93 +306,83 @@ void setup()
   Serial.print("Flash Size: ");
   Serial.print(ESP.getFlashChipSize() / (1024 * 1024));
   Serial.println(" MB");
-  Serial.println("================================================\n");
+  Serial.println("===============================================\n");
   
   // Initialize e-ink display and LVGL
   eink_init();
   
-  // Load initial screen (Splash)
+  // Load splash screen
   load_screen(SCREEN_SPLASH);
   
   // Initial render
   Serial.println("[LVGL] Performing initial render...");
   lv_refr_now(eink_get_display());
   
+  // Connect to WiFi
+  connect_wifi();
+  
+  // Connect to MQTT if WiFi connected
+  if (wifi_connected) {
+    delay(1000);
+    connect_mqtt();
+  }
+  
+  // Transition to grid power screen if connected
+  if (wifi_connected && mqtt_connected) {
+    delay(2000);
+    Serial.println("\n[APP] Connection successful - loading Grid Power screen");
+    ui_Screen_Splash_set_status("Ready!");
+    lv_refr_now(eink_get_display());
+    delay(1000);
+    load_screen(SCREEN_GRID_POWER);
+    lv_refr_now(eink_get_display());
+  } else {
+    Serial.println("\n[APP] Connection failed - staying on splash screen");
+  }
+  
   Serial.println("\n[READY] System initialized");
-  Serial.println("[INFO] Screen sequence: Splash (5s) -> Arc (20s) -> Bar (20s) -> repeat");
-  Serial.print("[INFO] Updates every ");
-  Serial.print(UPDATE_INTERVAL / 1000.0);
-  Serial.println(" seconds with partial refresh");
   Serial.print("[INFO] Full refresh every ");
   Serial.print(MAX_PARTIAL_UPDATES);
-  Serial.println(" e-ink flushes to clear ghosting");
-  Serial.println("[INFO] (Multiple widgets = multiple flushes per cycle)\n");
+  Serial.println(" e-ink flushes to clear ghosting\n");
   
-  lastUpdate = millis();
   screen_start_time = millis();
 }
 
 void loop()
 {
+  static unsigned long lastHeartbeat = 0;
   unsigned long currentMillis = millis();
   
-  // ===== SCREEN TRANSITION LOGIC =====
-  // Check if we need to transition screens
-  if (current_screen_id == SCREEN_SPLASH) {
-    // Splash -> Arc after 5 seconds
-    if (currentMillis - screen_start_time >= SPLASH_DURATION) {
-      Serial.println("\n[APP] Splash timeout - transitioning to Arc screen");
-      load_screen(SCREEN_ARC);
-      lastUpdate = currentMillis;
+  // ===== MQTT CONNECTION MAINTENANCE =====
+  if (wifi_connected && mqtt_connected) {
+    if (!mqttClient.connected()) {
+      reconnect_mqtt();
     }
-  }
-  else if (current_screen_id == SCREEN_ARC) {
-    // Arc -> Bar after 20 seconds
-    if (currentMillis - screen_start_time >= ARC_BAR_DURATION) {
-      Serial.println("\n[APP] Arc timeout - transitioning to Bar screen");
-      load_screen(SCREEN_BAR);
-      lastUpdate = currentMillis;
-    }
-  }
-  else if (current_screen_id == SCREEN_BAR) {
-    // Bar -> Arc after 20 seconds (rotate forever)
-    if (currentMillis - screen_start_time >= ARC_BAR_DURATION) {
-      Serial.println("\n[APP] Bar timeout - transitioning to Arc screen");
-      load_screen(SCREEN_ARC);
-      lastUpdate = currentMillis;
-    }
-  }
-  
-  // ===== MANUAL REFRESH CONTROL =====
-  // We control when the display updates (not automatic LVGL timer).
-  // This is KEY for e-ink power efficiency:
-  // - Only refresh when content changes
-  // - Avoid continuous polling (lv_task_handler)
-  // - Display retains image without power between updates
-  //
-  // For battery operation, you could use deep sleep between updates
-  // and achieve <50µA average current!
-  if (currentMillis - lastUpdate >= UPDATE_INTERVAL) {
-    // Call current screen's update function (if it has one)
-    screen_t *current_screen = &screens[current_screen_id];
-    if (current_screen->on_update) {
-      current_screen->on_update();
-      
-      // Check if we need a full refresh to clear ghosting
-      eink_force_full_refresh();
-      
-      // Trigger LVGL refresh
-      lv_refr_now(eink_get_display());
-      
-      // Power off panel voltages to prevent fading
-      eink_poweroff();
-    }
+    mqttClient.loop();
     
-    lastUpdate = currentMillis;
+    // Heartbeat every 10 seconds
+    if (currentMillis - lastHeartbeat >= 10000) {
+      Serial.println("[MQTT] Heartbeat - still connected");
+      lastHeartbeat = currentMillis;
+    }
   }
   
-  // LVGL task handler is NOT called here - we use manual refresh only
-  // This is key for e-ink battery efficiency
+  // ===== DISPLAY REFRESH =====
+  // Refresh display when triggered by MQTT message
+  if (display_needs_refresh) {
+    Serial.println("[APP] Refreshing display...");
+    
+    // Check if we need a full refresh to clear ghosting
+    eink_force_full_refresh();
+    
+    // Trigger LVGL refresh
+    lv_refr_now(eink_get_display());
+    
+    // Power off panel voltages to prevent fading
+    eink_poweroff();
+    
+    display_needs_refresh = false;
+  }
   
-  delay(100); // Small delay to prevent watchdog issues
+  delay(10); // Small delay to prevent watchdog issues
 }

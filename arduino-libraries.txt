@@ -14,8 +14,8 @@
 # To find library names: arduino-cli lib search <keyword>
 
 # Core libraries
-# WiFi
-# ArduinoJson
+ArduinoJson@7.2.1
+PubSubClient@2.8
 
 # E-ink display with LVGL support
 GxEPD2@1.6.0
